@@ -1,16 +1,18 @@
 <#
 .SYNOPSIS
-    Configures Privileged Identity Management (PIM) settings for 29 Entra ID roles.
+    Configures Privileged Identity Management (PIM) settings for 42 Entra ID roles.
 .DESCRIPTION
     For each of 29 Entra ID roles this script:
-      - Creates a security group named PIM-2606-<RoleName> (skips if it already exists)
-      - Assigns the group as eligible for the corresponding role
-      - Configures the PIM policy activation duration and maximum eligibility period:
+      - Creates a role-assignable security group named PIM-2606-<RoleName> (skips if already exists)
+      - Permanently assigns the group to the corresponding Entra ID role (active, no expiration)
+      - Configures the PIM role policy:
           Tier 1 roles (9 high-privilege): 2-hour max activation, 6-month max eligibility
           Tier 2 roles (20 standard):      4-hour max activation, 12-month max eligibility
+      - Requires MFA and justification for every activation
       - Requires approval for activation of all roles except Global Administrator;
         the approver group is PIM-2606-Global-Administrator
 
+    Role definition IDs are resolved from the tenant at runtime to avoid hardcoded-GUID drift.
     Installs NuGet and the Microsoft.Graph.Authentication module if not present.
     Reuses an existing Microsoft Graph session when required scopes are already granted.
 .PARAMETER TenantId
@@ -73,9 +75,8 @@ foreach ($mod in @('Microsoft.Graph.Authentication')) {
 #region Authentication
 
 $requiredScopes = @(
-    'RoleManagement.ReadWrite.Directory',        # required to create role-assignable groups
-    'RoleManagementPolicy.ReadWrite.Directory',
-    'RoleEligibilitySchedule.ReadWrite.Directory',
+    'RoleManagement.ReadWrite.Directory',     # permanent role assignments + role-assignable group creation
+    'RoleManagementPolicy.ReadWrite.Directory', # PIM role policy rule PATCH
     'Group.ReadWrite.All'
 )
 
@@ -108,41 +109,66 @@ Write-Host "Connected as: $($ctx.Account)   Tenant: $($ctx.TenantId)" -Foregroun
 # Tier 1: 2-hour max activation, 6-month max eligibility
 # Tier 2: 4-hour max activation, 12-month max eligibility
 # RequiresApproval: $false only for Global Administrator
+# Role definition IDs are resolved from the tenant at runtime (see Main region) to avoid
+# hardcoded-GUID drift as Microsoft occasionally changes or adds role definitions.
 $roles = @(
-    [PSCustomObject]@{ Id = '62e90394-69f5-4237-9190-012177145e10'; Name = 'Global Administrator';                     Tier = 1; RequiresApproval = $false }
-    [PSCustomObject]@{ Id = '3a2c62db-5318-420d-8d74-23affee5d9d5'; Name = 'Intune Administrator';                    Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '9360feb5-f418-4baa-8175-e2a00bac4301'; Name = 'Exchange Administrator';                  Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'b1be1c3e-b65d-4f19-8427-f6fa0d97feb9'; Name = 'Conditional Access Administrator';        Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'c4e39bd9-1100-46d3-8c65-fb160da0071f'; Name = 'Authentication Administrator';            Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '0526716b-113d-4c15-b2c8-68e3c22b9f80'; Name = 'Authentication Policy Administrator';     Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2'; Name = 'Privileged Authentication Administrator'; Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'; Name = 'Privileged Role Administrator';           Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '5d6b6bb7-de71-4623-b4af-96380a352509'; Name = 'Security Administrator';                  Tier = 1; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'; Name = 'Application Administrator';              Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '158c047a-c907-4556-b7ef-446551a6b5f7'; Name = 'Cloud Application Administrator';         Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '7698a772-787b-4ac8-901f-60d6b08affd2'; Name = 'Cloud Device Administrator';              Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'cf1c38e5-3621-4004-a7cb-879624dced7c'; Name = 'Compliance Administrator';                Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'ecb2c6bf-0ab6-418e-bd87-7986f8d63bbe'; Name = 'Compliance Data Administrator';           Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '29232cdf-9323-42fd-ade2-1d097af3e4de'; Name = 'Exchange Recipient Administrator';        Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'be2f45a1-457d-42af-a067-6ec1fa63bc45'; Name = 'External ID User Flow Administrator';     Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '59d46f88-662b-457b-bceb-5c3809e5908f'; Name = 'External ID Attribute Administrator';     Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'f2ef992c-3afb-46b9-b7cf-a126ee74c451'; Name = 'Global Reader';                           Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'fdd7a751-b60b-444a-984c-02652fe8fa1c'; Name = 'Groups Administrator';                    Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '729827e3-9c14-49f7-bb1b-9608f156bbb8'; Name = 'Helpdesk Administrator';                  Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '8329153b-31d0-4727-b945-745eb3bc5f31'; Name = 'Hybrid Identity Administrator';           Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '194ae4cb-b126-40b2-bd5b-6091b380977d'; Name = 'Identity Governance Administrator';       Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'aaf43236-0c0d-4d5f-883a-6955382ac081'; Name = 'Knowledge Administrator';                 Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '966707d0-3269-4727-9be2-8c3a10f19b9d'; Name = 'Password Administrator';                  Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '5f2222b1-57c3-48ba-8ad5-d4759f1fde6f'; Name = 'Security Operator';                       Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'fe930be7-5e62-47db-91af-98c3a49a38b1'; Name = 'SharePoint Administrator';                Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '422218e4-db15-4ef9-bbe0-8afb41546d79'; Name = 'Teams Administrator';                     Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = 'e8611ab8-c189-46e8-94e1-60213ab1f814'; Name = 'User Administrator';                      Tier = 2; RequiresApproval = $true  }
-    [PSCustomObject]@{ Id = '25a516ed-2fa0-40ea-a2d0-12923a21473a'; Name = 'Application Developer';                   Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Global Administrator';                          Tier = 1; RequiresApproval = $false }
+    [PSCustomObject]@{ Name = 'Intune Administrator';                          Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Exchange Administrator';                        Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Conditional Access Administrator';              Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Authentication Administrator';                  Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Authentication Policy Administrator';           Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Privileged Authentication Administrator';       Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Privileged Role Administrator';                 Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Security Administrator';                        Tier = 1; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Application Administrator';                     Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Cloud Application Administrator';               Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Cloud Device Administrator';                    Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Compliance Administrator';                      Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Compliance Data Administrator';                 Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Exchange Recipient Administrator';              Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'External ID User Flow Administrator';           Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'External ID User Flow Attribute Administrator'; Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Global Reader';                                 Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Groups Administrator';                          Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Helpdesk Administrator';                        Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Hybrid Identity Administrator';                 Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Identity Governance Administrator';             Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Knowledge Administrator';                       Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Password Administrator';                        Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Security Operator';                             Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'SharePoint Administrator';                      Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Teams Administrator';                           Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'User Administrator';                            Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Application Developer';                         Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Agent ID Administrator';                        Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'AI Administrator';                              Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'AI Reader';                                     Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Attribute Provisioning Administrator';          Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Attribute Provisioning Reader';                 Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Authentication Extensibility Administrator';    Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Authentication Extensibility Password Administrator'; Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'B2C IEF Keyset Administrator';                 Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Directory Writers';                             Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Domain Name Administrator';                     Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'External Identity Provider Administrator';      Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Lifecycle Workflows Administrator';             Tier = 2; RequiresApproval = $true  }
+    [PSCustomObject]@{ Name = 'Security Reader';                               Tier = 2; RequiresApproval = $true  }
 )
 
 #endregion Role Definitions
 
 #region Helper Functions
+
+function Get-RoleDefinitionId {
+    param([string] $DisplayName)
+    $filter   = [Uri]::EscapeDataString("displayName eq '$DisplayName' and isBuiltIn eq true")
+    $response = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=$filter&`$select=id,displayName"
+    $roleDef = $response.value | Select-Object -First 1
+    if (-not $roleDef) { throw "Role definition not found in tenant: '$DisplayName'" }
+    return $roleDef.id
+}
 
 function Get-OrCreateGroup {
     param(
@@ -180,6 +206,53 @@ function Get-OrCreateGroup {
     return $created
 }
 
+function Set-PermanentRoleAssignment {
+    param(
+        [string] $RoleId,
+        [string] $GroupId
+    )
+    $filter   = [Uri]::EscapeDataString(
+        "principalId eq '$GroupId' and roleDefinitionId eq '$RoleId' and directoryScopeId eq '/'"
+    )
+    $existing = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentSchedules?`$filter=$filter"
+    if ($existing.value -and $existing.value.Count -gt 0) {
+        Write-Host '    Permanent role assignment already exists for this group.' -ForegroundColor DarkGray
+        return
+    }
+    $startTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $body = @{
+        action           = 'adminAssign'
+        justification    = 'Permanent role assignment for PIM access group - via Import-PIMSettings.ps1'
+        roleDefinitionId = $RoleId
+        directoryScopeId = '/'
+        principalId      = $GroupId
+        scheduleInfo     = @{
+            startDateTime = $startTime
+            expiration    = @{ type = 'noExpiration' }
+        }
+    } | ConvertTo-Json -Depth 5
+    $assignUri   = 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentScheduleRequests'
+    $maxAttempts = 6
+    $retryDelay  = 15
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            Invoke-MgGraphRequest -Method POST -Uri $assignUri -ContentType 'application/json' -Body $body | Out-Null
+            Write-Host '    Group permanently assigned to role (no expiration).' -ForegroundColor Green
+            return
+        }
+        catch {
+            $errText = $_.ToString()
+            if ($attempt -lt $maxAttempts -and ($errText -match 'SubjectNotFound' -or $errText -match '404')) {
+                Write-Host "    Group not yet replicated; retrying in $retryDelay s (attempt $attempt/$maxAttempts)..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $retryDelay
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 function Get-PolicyIdForRole {
     param([string] $RoleId)
     $filter   = [Uri]::EscapeDataString(
@@ -189,7 +262,7 @@ function Get-PolicyIdForRole {
         -Uri "https://graph.microsoft.com/v1.0/policies/roleManagementPolicyAssignments?`$filter=$filter"
     $assignment = $response.value | Select-Object -First 1
     if (-not $assignment) {
-        throw "No PIM policy assignment found for role ID '$RoleId'. Ensure PIM is enabled in this tenant."
+        throw "No PIM policy assignment found for role '$RoleId'. Ensure PIM is enabled in this tenant."
     }
     return $assignment.policyId
 }
@@ -209,6 +282,19 @@ function Set-PolicyExpirationRule {
     # only force it for the activation rule where it is known to be accepted
     if ($ForceExpirationRequired) { $rule['isExpirationRequired'] = $true }
     $rule['maximumDuration'] = $Duration
+    Invoke-MgGraphRequest -Method PATCH -Uri $ruleUri -ContentType 'application/json' `
+        -Body ($rule | ConvertTo-Json -Depth 10) | Out-Null
+}
+
+function Set-PolicyEnablementRule {
+    param(
+        [string]   $PolicyId,
+        [string[]] $EnabledRules
+    )
+    $ruleUri = "https://graph.microsoft.com/v1.0/policies/roleManagementPolicies/$PolicyId/rules/Enablement_EndUser_Assignment"
+    $rule = Invoke-MgGraphRequest -Method GET -Uri $ruleUri
+    $rule.Remove('@odata.context')
+    $rule['enabledRules'] = $EnabledRules
     Invoke-MgGraphRequest -Method PATCH -Uri $ruleUri -ContentType 'application/json' `
         -Body ($rule | ConvertTo-Json -Depth 10) | Out-Null
 }
@@ -275,66 +361,23 @@ function Set-PolicyApprovalRule {
         -Body $body | Out-Null
 }
 
-function Set-RoleEligibility {
-    param(
-        [string] $RoleId,
-        [string] $GroupId,
-        [string] $Duration
-    )
-    $filter   = [Uri]::EscapeDataString(
-        "principalId eq '$GroupId' and roleDefinitionId eq '$RoleId' and directoryScopeId eq '/'"
-    )
-    $existing = Invoke-MgGraphRequest -Method GET `
-        -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilitySchedules?`$filter=$filter"
-    if ($existing.value -and $existing.value.Count -gt 0) {
-        Write-Host '    Eligibility assignment already exists for this group/role.' -ForegroundColor DarkGray
-        return
-    }
-    $startTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    $body = @{
-        action           = 'adminAssign'
-        justification    = 'PIM group eligibility - automated assignment via Import-PIMSettings.ps1'
-        roleDefinitionId = $RoleId
-        directoryScopeId = '/'
-        principalId      = $GroupId
-        scheduleInfo     = @{
-            startDateTime = $startTime
-            expiration    = @{
-                type     = 'afterDuration'
-                duration = $Duration
-            }
-        }
-    } | ConvertTo-Json -Depth 5
-    $eligUri     = 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleRequests'
-    $maxAttempts = 6
-    $retryDelay  = 15   # seconds between retries for Entra ID group replication lag
-    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        try {
-            Invoke-MgGraphRequest -Method POST -Uri $eligUri -ContentType 'application/json' -Body $body | Out-Null
-            Write-Host "    Eligibility assigned (duration: $Duration)" -ForegroundColor Green
-            return
-        }
-        catch {
-            $errText = $_.ToString()
-            if ($attempt -lt $maxAttempts -and ($errText -match 'SubjectNotFound' -or $errText -match '404')) {
-                Write-Host "    Group not yet replicated; retrying in $retryDelay s (attempt $attempt/$maxAttempts)..." -ForegroundColor Yellow
-                Start-Sleep -Seconds $retryDelay
-            } else {
-                throw
-            }
-        }
-    }
-}
-
 #endregion Helper Functions
 
 #region Main
+
+Write-Host ''
+Write-Host 'Resolving role definition IDs from tenant...' -ForegroundColor Cyan
+foreach ($role in $roles) {
+    $role | Add-Member -NotePropertyName 'Id' -NotePropertyValue (Get-RoleDefinitionId -DisplayName $role.Name) -Force
+    Write-Host "  $($role.Name): $($role.Id)" -ForegroundColor DarkGray
+}
+Write-Host "  All $($roles.Count) role IDs resolved." -ForegroundColor Green
 
 $approverGroupName = 'PIM-2606-Global-Administrator'
 Write-Host ''
 Write-Host "Resolving approver group '$approverGroupName' ..." -ForegroundColor Cyan
 $approverGroup   = Get-OrCreateGroup -DisplayName $approverGroupName `
-    -Description 'PIM eligible group and activation approver group for Global Administrator role'
+    -Description 'PIM access group and activation approver group for Global Administrator role'
 $approverGroupId = $approverGroup.id
 Write-Host "  Approver group ID: $approverGroupId" -ForegroundColor DarkGray
 
@@ -358,43 +401,46 @@ foreach ($role in $roles) {
 
     try {
         # 1. Security group
-        Write-Host '  [1/5] Security group...' -ForegroundColor DarkGray
+        Write-Host '  [1/7] Security group...' -ForegroundColor DarkGray
         $group   = Get-OrCreateGroup -DisplayName $groupName `
-            -Description "PIM eligible group for Entra ID role: $($role.Name)"
+            -Description "PIM access group for Entra ID role: $($role.Name)"
         $groupId = $group.id
 
-        # 2. PIM policy ID
-        Write-Host '  [2/5] Retrieving PIM policy...' -ForegroundColor DarkGray
+        # 2. Assign group permanently to role (no expiration)
+        Write-Host '  [2/7] Assigning group permanently to role...' -ForegroundColor DarkGray
+        Set-PermanentRoleAssignment -RoleId $role.Id -GroupId $groupId
+
+        # 3. Role PIM policy ID
+        Write-Host '  [3/7] Retrieving role PIM policy...' -ForegroundColor DarkGray
         $policyId = Get-PolicyIdForRole -RoleId $role.Id
         Write-Host "    Policy ID: $policyId" -ForegroundColor DarkGray
 
-        # 3. Activation duration
-        Write-Host "  [3/5] Setting max activation to $activationDuration ..." -ForegroundColor DarkGray
+        # 4. Max activation time
+        Write-Host "  [4/7] Setting max activation to $activationDuration ..." -ForegroundColor DarkGray
         Set-PolicyExpirationRule -PolicyId $policyId `
             -RuleId                  'Expiration_EndUser_Assignment' `
             -Duration                $activationDuration `
             -ForceExpirationRequired $true
 
-        # 4. Eligibility duration
-        Write-Host "  [4/5] Setting max eligibility to $eligibilityDuration ..." -ForegroundColor DarkGray
+        # 5. Max eligibility period
+        Write-Host "  [5/7] Setting max eligibility to $eligibilityDuration ..." -ForegroundColor DarkGray
         Set-PolicyExpirationRule -PolicyId $policyId `
-            -RuleId    'Expiration_Admin_Eligibility' `
-            -Duration  $eligibilityDuration
-        # note: isExpirationRequired is intentionally not forced here — it is read-only
-        #       on built-in Entra ID roles; actual assignment duration is set in step 6
+            -RuleId   'Expiration_Admin_Eligibility' `
+            -Duration $eligibilityDuration
 
-        # 5. Approval rule
-        Write-Host "  [5/5] Configuring approval rule..." -ForegroundColor DarkGray
+        # 6. Require MFA and justification for every activation
+        Write-Host '  [6/7] Requiring MFA and justification for activation...' -ForegroundColor DarkGray
+        Set-PolicyEnablementRule -PolicyId $policyId `
+            -EnabledRules @('MultiFactorAuthentication', 'Justification')
+
+        # 7. Approval rule
+        Write-Host '  [7/7] Configuring approval rule...' -ForegroundColor DarkGray
         Set-PolicyApprovalRule -PolicyId $policyId `
             -RequiresApproval  $role.RequiresApproval `
             -ApproverGroupId   $approverGroupId `
             -ApproverGroupName $approverGroupName
 
-        # 6. Eligibility assignment
-        Write-Host '  [+] Assigning group as eligible for role...' -ForegroundColor DarkGray
-        Set-RoleEligibility -RoleId $role.Id -GroupId $groupId -Duration $eligibilityDuration
-
-        Write-Host "  OK" -ForegroundColor Green
+        Write-Host '  OK' -ForegroundColor Green
     }
     catch {
         Write-Warning "Failed to process role '$($role.Name)': $_"
