@@ -52,17 +52,28 @@ function New-CAPolicyIfNotExists {
 
 #endregion
 
-#region Module Import
-# Modules are installed by CAPolicyFrameworkV2.ps1 — only imported here
+#region Prerequisites
 
-@(
+if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue |
+        Where-Object { $_.Version -ge '2.8.5.201' })) {
+    Write-Host "Installing NuGet package provider..." -ForegroundColor Yellow
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+}
+
+foreach ($mod in @(
     'Microsoft.Graph.Authentication'
     'Microsoft.Graph.Groups'
     'Microsoft.Graph.Identity.SignIns'
     'Microsoft.Graph.Identity.DirectoryManagement'
-) | ForEach-Object { Import-Module $_ -ErrorAction Stop }
+)) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "Installing module '$mod'..." -ForegroundColor Yellow
+        Install-Module -Name $mod -Scope CurrentUser -Force -AllowClobber
+    }
+    Import-Module -Name $mod -ErrorAction Stop
+}
 
-#endregion
+#endregion Prerequisites
 
 #region Graph Connection
 
