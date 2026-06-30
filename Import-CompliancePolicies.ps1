@@ -16,7 +16,7 @@
     .NOTES
     Required Graph scopes:
         DeviceManagementConfiguration.ReadWrite.All
-        Group.Read.All
+        Group.ReadWrite.All
         DeviceManagementRBAC.Read.All
 
     .EXAMPLE
@@ -50,7 +50,7 @@ foreach ($module in @('Microsoft.Graph.Authentication')) {
 Write-Host "  Prerequisites OK." -ForegroundColor Green
 
 # ── Graph connection ──────────────────────────────────────────────────────────
-Connect-MgGraph -Scopes 'DeviceManagementConfiguration.ReadWrite.All', 'Group.Read.All', 'DeviceManagementRBAC.Read.All' -NoWelcome
+Connect-MgGraph -Scopes 'DeviceManagementConfiguration.ReadWrite.All', 'Group.ReadWrite.All', 'DeviceManagementRBAC.Read.All' -NoWelcome
 
 # ── Policy templates ──────────────────────────────────────────────────────────
 # Shared baseline settings — overridden per-template below
@@ -140,8 +140,8 @@ $policyTemplates = @(
 
 # ── Tenant definitions ────────────────────────────────────────────────────────
 $tenants = @(
-    @{ Prefix = 'PAW-Global'; ScopeTagName = 'PAW'; GroupName = 'PAW-Global-Users' },
-    @{ Prefix = 'EUD-Global'; ScopeTagName = 'EUD'; GroupName = 'EUD-Global-Users' }
+    @{ Prefix = 'PAW-Global'; ScopeTagName = 'PAW'; GroupName = 'PAW-Global-Users'; AutoCreate = $false },
+    @{ Prefix = 'EUD-Global'; ScopeTagName = 'EUD'; GroupName = 'EUD-Global-Users'; AutoCreate = $true  }
 )
 
 # ── One-time lookups ──────────────────────────────────────────────────────────
@@ -160,9 +160,27 @@ foreach ($tenant in $tenants) {
     $groupResp = Invoke-MgGraphRequest -Method GET `
         -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq '$escaped'&`$select=id,displayName"
     $group = $groupResp.value | Select-Object -First 1
-    if (-not $group) { throw "Entra group '$($tenant.GroupName)' not found." }
-    $tenant.GroupId = $group.id
-    Write-Host "  Group '$($tenant.GroupName)' → $($group.id)" -ForegroundColor DarkGray
+    if (-not $group) {
+        if ($tenant.AutoCreate) {
+            $mailNickname = $tenant.GroupName -replace '[^a-zA-Z0-9]', ''
+            $newGroup = Invoke-MgGraphRequest -Method POST -ContentType 'application/json' `
+                -Uri 'https://graph.microsoft.com/v1.0/groups' `
+                -Body (@{
+                    displayName     = $tenant.GroupName
+                    mailEnabled     = $false
+                    mailNickname    = $mailNickname
+                    securityEnabled = $true
+                    groupTypes      = @()
+                } | ConvertTo-Json)
+            $tenant.GroupId = $newGroup.id
+            Write-Host "  Group '$($tenant.GroupName)' created (ID: $($newGroup.id))" -ForegroundColor Green
+        } else {
+            throw "Entra group '$($tenant.GroupName)' not found."
+        }
+    } else {
+        $tenant.GroupId = $group.id
+        Write-Host "  Group '$($tenant.GroupName)' → $($group.id)" -ForegroundColor DarkGray
+    }
 }
 
 # ── Helper: check if policy already exists ────────────────────────────────────
