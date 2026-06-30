@@ -1,5 +1,22 @@
 #Requires -Version 5.1
 <#
+.SYNOPSIS
+    Deploys PAW Conditional Access policies for the PAWCSM framework.
+.PARAMETER PawAuthContextId
+    Optional. ID of an existing authentication context slot (e.g. 'c3') to adopt as
+    'PAW-Role-Activation'. Required when all c1-c25 slots are already in use and none
+    is named 'PAW-Role-Activation'. Run the script once without this parameter to see
+    a list of all existing contexts if an error occurs.
+.PARAMETER TenantId
+    Optional tenant ID for explicit tenant targeting.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)][string] $PawAuthContextId,
+    [Parameter(Mandatory = $false)][string] $TenantId
+)
+
+<#
 DISCLAIMER The sample scripts are not supported under any Microsoft standard support program or service.
 The sample codes are provided AS IS without warranty of any kind. Microsoft further disclaims all implied
 warranties including, without limitation, any implied warranties of merchantability or of fitness for a
@@ -49,13 +66,19 @@ function New-CAPolicyIfNotExists {
 
 #region Graph Connection
 
-Connect-MgGraph -Scopes @(
-    'Policy.Read.All'
-    'Policy.ReadWrite.ConditionalAccess'
-    'Group.ReadWrite.All'
-    'User.Read.All'
-    'Domain.Read.All'
-) -NoWelcome -ErrorAction Stop
+$connectParams = @{
+    Scopes      = @(
+        'Policy.Read.All'
+        'Policy.ReadWrite.ConditionalAccess'
+        'Group.ReadWrite.All'
+        'User.Read.All'
+        'Domain.Read.All'
+    )
+    NoWelcome   = $true
+    ErrorAction = 'Stop'
+}
+if ($TenantId) { $connectParams['TenantId'] = $TenantId }
+Connect-MgGraph @connectParams
 
 $context = Get-MgContext
 Write-Host "Connected as: $($context.Account) | Tenant: $($context.TenantId)" -ForegroundColor Green
@@ -189,6 +212,64 @@ if ([string]::IsNullOrEmpty($pawAuthStrengthId)) {
 
 #endregion
 
+#region Authentication Context
+
+$rawAuthContexts  = Invoke-MgGraphRequest -Method GET `
+    -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/authenticationContextClassReferences'
+# Normalize: the API may return null, a single object, or an array
+$existingAuthContexts = @(if ($rawAuthContexts.value) { $rawAuthContexts.value } else { @() })
+
+$existingPawContext = $existingAuthContexts | Where-Object { $_.displayName -eq 'PAW-Role-Activation' }
+
+if ($existingPawContext) {
+    $pawAuthContextId = $existingPawContext.id
+    Write-Host "Authentication context 'PAW-Role-Activation' already exists (id: $pawAuthContextId)." -ForegroundColor Green
+} else {
+    # Resolve which slot to adopt: explicit parameter > first unclaimed > c1 (when none returned)
+    if ($PawAuthContextId) {
+        $targetId = $PawAuthContextId
+    } elseif ($existingAuthContexts.Count -eq 0) {
+        # Tenant returned no contexts — slots are uninitialized; start with c1
+        $targetId = 'c1'
+    } else {
+        $unclaimed = $existingAuthContexts |
+            Where-Object { -not $_.isAvailable -or [string]::IsNullOrEmpty($_.displayName) } |
+            Select-Object -First 1
+        if ($unclaimed) {
+            $targetId = $unclaimed.id
+        } else {
+            $contextList = ($existingAuthContexts |
+                ForEach-Object { "  $($_.id): $($_.displayName)" }) -join "`n"
+            Write-Error ("All authentication context slots (c1-c25) are already in use.`n" +
+                "Re-run with -PawAuthContextId <id> to adopt one of the existing slots:`n$contextList")
+            exit 1
+        }
+    }
+
+    $pawAuthContextId = $targetId
+    Write-Host "Configuring authentication context slot '$pawAuthContextId' as 'PAW-Role-Activation'..." -ForegroundColor Yellow
+    try {
+        Invoke-MgGraphRequest -Method PATCH `
+            -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/authenticationContextClassReferences/$pawAuthContextId" `
+            -ContentType 'application/json' `
+            -Body (@{
+                displayName = 'PAW-Role-Activation'
+                description = 'Requires PAW device for PIM role activation'
+                isAvailable = $true
+            } | ConvertTo-Json) | Out-Null
+    } catch {
+        Write-Error "Failed to configure PAW authentication context: $_"
+        exit 1
+    }
+}
+
+if ([string]::IsNullOrEmpty($pawAuthContextId)) {
+    Write-Error 'PAW authentication context ID could not be resolved. Cannot continue.'
+    exit 1
+}
+
+#endregion
+
 #region Conditional Access Policies
 
 $script:existingPolicies = Get-MgIdentityConditionalAccessPolicy -All
@@ -197,35 +278,50 @@ $pawInclude   = @($pawUsersGroupId)
 $bgExclude    = @($breakGlass1Id, $breakGlass2Id)
 
 $pawAdminRoleIds = @(
-    '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'  # Application Administrator
+    # --- Tier 1 ---
+    '62e90394-69f5-4237-9190-012177145e10'  # Global Administrator
+    '3a2c62db-5318-420d-8d74-23affee5d9d5'  # Intune Administrator
+    'b1be1c3e-b65d-4f19-8427-f6fa0d97feb9'  # Conditional Access Administrator
     'c4e39bd9-1100-46d3-8c65-fb160da0071f'  # Authentication Administrator
     '0526716b-113d-4c15-b2c8-68e3c22b9f80'  # Authentication Policy Administrator
+    '8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2'  # Hybrid Identity Administrator
+    '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'  # Privileged Authentication Administrator
+    'e8611ab8-c189-46e8-94e1-60213ab1f814'  # Privileged Role Administrator
+    '194ae4cb-b126-40b2-bd5b-6091b380977d'  # Security Administrator
+    # --- Tier 2 ---
+    '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'  # Application Administrator
+    'cf1c38e5-3621-4004-a7cb-879624dced7c'  # Application Developer
+    'ecb2c6bf-0ab6-418e-bd87-7986f8d63bbe'  # Attribute Provisioning Administrator
+    '422218e4-db15-4ef9-bbe0-8afb41546d79'  # Attribute Provisioning Reader
+    '25a516ed-2fa0-40ea-a2d0-12923a21473a'  # Authentication Extensibility Administrator
+    'aaf43236-0c0d-4d5f-883a-6955382ac081'  # B2C IEF Keyset Administrator
     '158c047a-c907-4556-b7ef-446551a6b5f7'  # Cloud Application Administrator
     '7698a772-787b-4ac8-901f-60d6b08affd2'  # Cloud Device Administrator
-    'b1be1c3e-b65d-4f19-8427-f6fa0d97feb9'  # Conditional Access Administrator
-    'cf1c38e5-3621-4004-a7cb-879624dced7c'  # Compliance Administrator
-    'ecb2c6bf-0ab6-418e-bd87-7986f8d63bbe'  # Compliance Data Administrator
-    '9360feb5-f418-4baa-8175-e2a00bac4301'  # Exchange Administrator
-    '29232cdf-9323-42fd-ade2-1d097af3e4de'  # Exchange Recipient Administrator
-    'be2f45a1-457d-42af-a067-6ec1fa63bc45'  # External ID User Flow Administrator
-    '59d46f88-662b-457b-bceb-5c3809e5908f'  # External ID Attribute Administrator
-    '62e90394-69f5-4237-9190-012177145e10'  # Global Administrator
+    '9360feb5-f418-4baa-8175-e2a00bac4301'  # Directory Writers
+    '8329153b-31d0-4727-b945-745eb3bc5f31'  # Domain Name Administrator
+    '29232cdf-9323-42fd-ade2-1d097af3e4de'  # Exchange Administrator
+    'be2f45a1-457d-42af-a067-6ec1fa63bc45'  # External Identity Provider Administrator
     'f2ef992c-3afb-46b9-b7cf-a126ee74c451'  # Global Reader
     'fdd7a751-b60b-444a-984c-02652fe8fa1c'  # Groups Administrator
     '729827e3-9c14-49f7-bb1b-9608f156bbb8'  # Helpdesk Administrator
-    '8329153b-31d0-4727-b945-745eb3bc5f31'  # Hybrid Identity Administrator
-    '194ae4cb-b126-40b2-bd5b-6091b380977d'  # Identity Governance Administrator
-    '3a2c62db-5318-420d-8d74-23affee5d9d5'  # Intune Administrator
-    'aaf43236-0c0d-4d5f-883a-6955382ac081'  # Knowledge Administrator
+    '59d46f88-662b-457b-bceb-5c3809e5908f'  # Lifecycle Workflows Administrator
     '966707d0-3269-4727-9be2-8c3a10f19b9d'  # Password Administrator
-    '8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2'  # Privileged Authentication Administrator
-    '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'  # Privileged Role Administrator
-    '5d6b6bb7-de71-4623-b4af-96380a352509'  # Security Administrator
+    '5d6b6bb7-de71-4623-b4af-96380a352509'  # Security Reader
     '5f2222b1-57c3-48ba-8ad5-d4759f1fde6f'  # Security Operator
-    'fe930be7-5e62-47db-91af-98c3a49a38b1'  # SharePoint Administrator
-    '422218e4-db15-4ef9-bbe0-8afb41546d79'  # Teams Administrator
-    'e8611ab8-c189-46e8-94e1-60213ab1f814'  # User Administrator
-    '25a516ed-2fa0-40ea-a2d0-12923a21473a'  # Application Developer
+    'fe930be7-5e62-47db-91af-98c3a49a38b1'  # User Administrator
+    'db506228-d27e-4b7d-95e5-295956d6615f'  # Agent ID Administrator
+    'd2562ede-74db-457e-a7b6-544e236ebb61'  # AI Administrator
+    '1fe13547-53f6-408d-ac04-7f8eed167b38'  # AI Reader
+    '0b00bede-4072-4d22-b441-e7df02a1ef63'  # Authentication Extensibility Password Administrator
+    '17315797-102d-40b4-93e0-432062caca18'  # Compliance Administrator
+    'e6d1a23a-da11-4be4-9570-befc86d067a7'  # Compliance Data Administrator
+    '31392ffb-586c-42d1-9346-e59415a2cc4e'  # Exchange Recipient Administrator
+    '6e591065-9bad-43ed-90f3-e9424366d2f0'  # External ID User Flow Administrator
+    '0f971eea-41eb-4569-a71e-57bb8a3eff1e'  # External ID User Flow Attribute Administrator
+    '45d8d3c5-c802-45c6-b32a-1d70b5e1e86e'  # Identity Governance Administrator
+    'b5a8dcf3-09d5-43a9-a639-8e29ef291470'  # Knowledge Administrator
+    'f28a1f50-f6e7-4571-818b-6a12f2af6b6c'  # SharePoint Administrator
+    '69091246-20e8-4a56-aa4d-066075b2a7a8'  # Teams Administrator
 )
 
 Write-Host "`nDeploying PAW Conditional Access policies..." -ForegroundColor Cyan
@@ -381,6 +477,100 @@ New-CAPolicyIfNotExists -DisplayName 'PAW-Global-2606-Allow-Require-Phishing-Res
         Operator               = 'OR'
         authenticationStrength = @{ id = $pawAuthStrengthId }
     }
+}
+
+# PAW11 — Block PAW users and admin roles from accessing any app unless the sign-in originates
+#          from a PAW device (extensionAttribute1 = "PAW"). MDM enrollment apps are excluded so
+#          a device can be enrolled and provisioned before the PAW attribute is stamped.
+$paw11ExcludeApps = @(
+    'd4ebce55-015a-49b5-a083-c84d1797ae8c'  # Microsoft Intune
+    '0000000a-0000-0000-c000-000000000000'  # Microsoft Intune Enrollment
+    '45a330b1-b1ec-4cc1-9161-9f03992aa49f'  # Windows Hello for Business Provisioning
+) | Where-Object {
+    $appId = $_
+    try {
+        Invoke-MgGraphRequest -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals(appId='$appId')" `
+            -ErrorAction Stop | Out-Null
+        $true
+    } catch { $false }
+}
+New-CAPolicyIfNotExists -DisplayName 'PAW-Global-2606-Block-Device-Filter' -BodyParameter @{
+    DisplayName   = 'PAW-Global-2606-Block-Device-Filter'
+    State         = 'EnabledForReportingButNotEnforced'
+    Conditions    = @{
+        Applications = @{
+            includeApplications = 'All'
+            excludeApplications = $paw11ExcludeApps
+        }
+        Users        = @{
+            includeGroups = $pawInclude
+            excludeUsers  = $bgExclude
+            includeRoles  = $pawAdminRoleIds
+        }
+        Devices      = @{
+            deviceFilter = @{
+                mode = 'exclude'
+                rule = 'device.extensionAttribute1 -eq "PAW"'
+            }
+        }
+    }
+    GrantControls = @{ BuiltInControls = @('block'); Operator = 'OR' }
+}
+
+# PAW12 — Require MFA and a compliant device for all PAW users and admin roles.
+#          WHfB Provisioning is excluded so users can complete provisioning before the
+#          device is marked compliant.
+$paw12ExcludeApps = @(
+    '45a330b1-b1ec-4cc1-9161-9f03992aa49f'  # Windows Hello for Business Provisioning
+) | Where-Object {
+    $appId = $_
+    try {
+        Invoke-MgGraphRequest -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals(appId='$appId')" `
+            -ErrorAction Stop | Out-Null
+        $true
+    } catch { $false }
+}
+New-CAPolicyIfNotExists -DisplayName 'PAW-Global-2606-Allow-Require-MFA-and-Compliant-Device' -BodyParameter @{
+    DisplayName   = 'PAW-Global-2606-Allow-Require-MFA-and-Compliant-Device'
+    State         = 'EnabledForReportingButNotEnforced'
+    Conditions    = @{
+        Applications = @{
+            includeApplications = 'All'
+            excludeApplications = $paw12ExcludeApps
+        }
+        Users        = @{
+            includeGroups = $pawInclude
+            excludeUsers  = $bgExclude
+            includeRoles  = $pawAdminRoleIds
+        }
+    }
+    GrantControls = @{ BuiltInControls = @('mfa', 'compliantDevice'); Operator = 'AND' }
+}
+
+# PAW13 — Block PAW users from completing PIM role activation (targeted via authentication context
+#          PAW-Role-Activation) unless the request originates from a PAW device.
+#          This ties PIM's "require auth context on activation" setting to the PAW device filter.
+New-CAPolicyIfNotExists -DisplayName 'PAW-Global-2606-Block-Device-Filter-Role-Activation-via-AuthContext' -BodyParameter @{
+    DisplayName   = 'PAW-Global-2606-Block-Device-Filter-Role-Activation-via-AuthContext'
+    State         = 'EnabledForReportingButNotEnforced'
+    Conditions    = @{
+        Applications = @{
+            includeAuthenticationContextClassReferences = @($pawAuthContextId)
+        }
+        Users        = @{
+            includeGroups = $pawInclude
+            excludeUsers  = $bgExclude
+        }
+        Devices      = @{
+            deviceFilter = @{
+                mode = 'exclude'
+                rule = 'device.extensionAttribute1 -eq "PAW"'
+            }
+        }
+    }
+    GrantControls = @{ BuiltInControls = @('block'); Operator = 'OR' }
 }
 
 #endregion
